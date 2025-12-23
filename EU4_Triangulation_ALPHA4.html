@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Triangulation EU4</title>
+<style>
+  body { font-family: Arial; background: #000; color: #fff; text-align: center; }
+  canvas { border: 1px solid #333; background: #111; margin: 20px auto; display: block; cursor: default; transform-origin: top left;}
+  table { margin: 20px auto; border-collapse: collapse; }
+  td, th { padding: 8px; border: 1px solid #555; }
+  input { width: 100px; background: #222; color: #fff; border: 1px solid #555; }
+  button { padding: 8px 16px; margin: 5px; background: #444; color: #fff; border: none; cursor: pointer; }
+  button:hover { background: #666; }
+  #info { margin: 10px; font-size: 14px; color: #ff0;font-weight: bold;}
+  h1  { color: #ff0; }
+  .red { color: #f44; font-weight: bold; }
+  .green { color: #4f4; font-weight: bold; }
+  .blue { color: #44f; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>Outil de Triangulation EU4</h1>
+<p>Distance = |XX1 - XX2| + |YY1 - YY2|</p>
+<table>
+  <tr><th>Planet</th><th>System ID</th><th>Dist (pc)</th><th>Color</th></tr>
+  <tr><td class="red">A</td><td><input id="sysA" value=""></td><td><input id="distA" value="" type="number"></td><td class="red">Red</td></tr>
+  <tr><td class="green">B</td><td><input id="sysB" value=""></td><td><input id="distB" value="" type="number"></td><td class="green">Green</td></tr>
+  <tr><td class="blue">C</td><td><input id="sysC" value=""></td><td><input id="distC" value="" type="number"></td><td class="blue">Blue</td></tr>
+</table>
+<button onclick="drawAll()">Trianguler</button>
+<button onclick="fullReset()">Reset</button>
+<button onclick="resetView()">Reset Zoom</button>
+<div id="info">Passe la souris sur la grille pour voir les systèmes!</div>
+
+<canvas id="galaxy" width="800" height="800"></canvas>
+
+<script>
+const canvas = document.getElementById('galaxy');
+const ctx = canvas.getContext('2d');
+const scale = 8;
+let zoomLevel = 1;        
+const minZoom = 1;
+const maxZoom = 8;        
+let offsetX = 0;
+let offsetY = 0;
+let isPanning = false;
+let startPanX = 0;
+let startPanY = 0;
+
+let hoverX = -1;
+let hoverY = -1;
+let hasDrawn = false;
+
+function sysToXY(sys) {
+  const s = parseInt(sys) || 0;
+  return {x: s % 100, y: Math.floor(s / 100)};
+}
+
+function manhattan(x1, y1, x2, y2) {
+  return Math.abs(x1 - x2) + Math.abs(y1 - y2);
+}
+
+function drawGrid() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#333';
+  for (let i = 0; i <= 100; i++) {
+    ctx.beginPath(); ctx.moveTo(i*scale, 0); ctx.lineTo(i*scale, 800); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i*scale); ctx.lineTo(800, i*scale); ctx.stroke();
+  }
+  ctx.fillStyle = '#888'; ctx.font = '10px Arial';
+  for (let i = 0; i < 100; i += 10) {
+    ctx.fillText(i.toString().padStart(2,'0'), i*scale + 2, 12);
+    ctx.save(); ctx.translate(0, i*scale + 12); ctx.rotate(-Math.PI/2); ctx.fillText(i.toString().padStart(2,'0'), 0, 0); ctx.restore();
+  }
+}
+
+function plotPoint(xy, color, label) {
+  ctx.fillStyle = color;
+  ctx.fillRect(xy.x*scale - 4, xy.y*scale - 4, 8, 8);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 12px Arial';
+  ctx.fillText(label, xy.x*scale + 8, xy.y*scale + 3);
+}
+
+function drawDiamond(xy, radius, color) {
+  const cx = xy.x * scale, cy = xy.y * scale;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - radius * scale);
+  ctx.lineTo(cx + radius * scale, cy);
+  ctx.lineTo(cx, cy + radius * scale);
+  ctx.lineTo(cx - radius * scale, cy);
+  ctx.closePath();
+  ctx.strokeStyle = color; ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.2; ctx.fillStyle = color; ctx.fill();
+  ctx.globalAlpha = 1; ctx.stroke();
+}
+
+function drawCrosshairLines() {
+  if (hoverX >= 0 && hoverX < 100 && hoverY >= 0 && hoverY < 100) {
+    ctx.strokeStyle = '#ff0';
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.8;
+
+    ctx.beginPath();
+    ctx.moveTo(0, hoverY * scale + scale / 2);
+    ctx.lineTo(800, hoverY * scale + scale / 2);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(hoverX * scale + scale / 2, 0);
+    ctx.lineTo(hoverX * scale + scale / 2, 800);
+    ctx.stroke();
+
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawHoverCell() {
+  if (hoverX >= 0 && hoverX < 100 && hoverY >= 0 && hoverY < 100) {
+    ctx.fillStyle = '#ff0';
+    ctx.globalAlpha = 0.5;
+    ctx.fillRect(hoverX * scale, hoverY * scale, scale, scale);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function triangulate() {
+  const sysA = document.getElementById('sysA').value.trim();
+  const distA = parseInt(document.getElementById('distA').value) || 0;
+  const sysB = document.getElementById('sysB').value.trim();
+  const distB = parseInt(document.getElementById('distB').value) || 0;
+  const sysC = document.getElementById('sysC').value.trim();
+  const distC = parseInt(document.getElementById('distC').value) || 0;
+
+  if (!sysA || distA === 0) return [];
+  const {x: xa, y: ya} = sysToXY(sysA);
+  const xb = sysB ? sysToXY(sysB).x : null;
+  const yb = sysB ? sysToXY(sysB).y : null;
+  const xc = sysC ? sysToXY(sysC).x : null;
+  const yc = sysC ? sysToXY(sysC).y : null;
+
+  let best = []; let minErr = Infinity;
+  for (let yy = 0; yy < 100; yy++) {
+    for (let xx = 0; xx < 100; xx++) {
+      const da = manhattan(xx, yy, xa, ya);
+      const db = sysB ? manhattan(xx, yy, xb, yb) : 0;
+      const dc = sysC ? manhattan(xx, yy, xc, yc) : 0;
+      const err = Math.abs(da - distA) + (sysB ? Math.abs(db - distB) : 0) + (sysC ? Math.abs(dc - distC) : 0);
+      if (err < minErr) {
+        minErr = err; best = [{xx, yy, err}];
+      } else if (err === minErr) {
+        best.push({xx, yy, err});
+      }
+    }
+  }
+  document.getElementById('info').innerHTML = `Min Error: ${minErr} | Best: ${best.length} systèmes`;
+  return best.filter(c => c.err <= 8);
+}
+
+function redrawAll() {
+  ctx.save();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.translate(offsetX, offsetY);
+  ctx.scale(zoomLevel, zoomLevel);
+
+  drawGrid();
+
+  if (hasDrawn) {
+    const sysA = document.getElementById('sysA').value.trim();
+    const distA = parseInt(document.getElementById('distA').value) || 0;
+    const sysB = document.getElementById('sysB').value.trim();
+    const distB = parseInt(document.getElementById('distB').value) || 0;
+    const sysC = document.getElementById('sysC').value.trim();
+    const distC = parseInt(document.getElementById('distC').value) || 0;
+
+    if (sysA && distA > 0) { const xy = sysToXY(sysA); plotPoint(xy, '#f44', 'A'); drawDiamond(xy, distA, '#f44'); }
+    if (sysB && distB > 0) { const xy = sysToXY(sysB); plotPoint(xy, '#4f4', 'B'); drawDiamond(xy, distB, '#4f4'); }
+    if (sysC && distC > 0) { const xy = sysToXY(sysC); plotPoint(xy, '#44f', 'C'); drawDiamond(xy, distC, '#44f'); }
+
+    const targets = triangulate();
+    targets.forEach(t => {
+      const sys = (t.yy*100 + t.xx).toString().padStart(4,'0');
+      plotPoint({x: t.xx, y: t.yy}, '#ff0', sys);
+    });
+  }
+
+  drawCrosshairLines();
+  drawHoverCell();
+
+  ctx.restore(); // Important : restore le contexte
+
+  // Info système (le hover est calculé avant zoom, donc pas affecté)
+  if (hoverX >= 0 && hoverX < 100 && hoverY >= 0 && hoverY < 100) {
+    const sysId = (hoverY * 100 + hoverX).toString().padStart(4, '0');
+    document.getElementById('info').innerHTML = `Hover: ${sysId} (${hoverY.toString().padStart(2,'0')}:${hoverX.toString().padStart(2,'0')}) | Zoom: ${zoomLevel}x`;
+  } else {
+    document.getElementById('info').innerHTML = 'Passe la souris sur la grille pour voir les systèmes | Zoom: ' + zoomLevel + 'x';
+  }
+}
+
+function drawAll() {
+  hasDrawn = true;
+  redrawAll();
+}
+
+function fullReset() {
+  document.getElementById('sysA').value = '';
+  document.getElementById('distA').value = '';
+  document.getElementById('sysB').value = '';
+  document.getElementById('distB').value = '';
+  document.getElementById('sysC').value = '';
+  document.getElementById('distC').value = '';
+
+  hasDrawn = false;
+  hoverX = -1;
+  hoverY = -1;
+  zoomLevel = 1;
+  offsetX = 0;
+  offsetY = 0;
+
+  drawGrid();
+  document.getElementById('info').innerHTML = 'Passe la souris sur la grille pour voir les systèmes!';
+}
+
+function resetView() {
+  zoomLevel = 1;
+  offsetX = 0;
+  offsetY = 0;
+  redrawAll();
+}
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+
+  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  let newZoom = zoomLevel * delta;
+
+  if (newZoom < minZoom) newZoom = minZoom;
+  if (newZoom > maxZoom) newZoom = maxZoom;
+
+  if (newZoom !== zoomLevel) {
+    zoomLevel = newZoom;
+    // On force toujours le centre de la grille au centre du canvas
+    offsetX = (canvas.width / 2) - (50 * scale * zoomLevel);  // 50 = moitié de 100 systèmes
+    offsetY = (canvas.height / 2) - (50 * scale * zoomLevel);
+    redrawAll();
+  }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  if (isPanning) {
+    offsetX = e.clientX - startPanX;
+    offsetY = e.clientY - startPanY;
+    redrawAll();
+  }
+  
+  const rect = canvas.getBoundingClientRect();
+  const scaledX = (e.clientX - rect.left - offsetX) / (scale * zoomLevel);
+  const scaledY = (e.clientY - rect.top - offsetY) / (scale * zoomLevel);
+  hoverX = Math.floor(scaledX);
+  hoverY = Math.floor(scaledY);
+  redrawAll();
+});
+
+canvas.addEventListener('mouseout', () => {
+  if (isPanning) {
+    isPanning = false;
+    canvas.style.cursor = 'default';
+  }
+  hoverX = -1;
+  hoverY = -1;
+  redrawAll();
+});
+
+drawGrid();
+</script>
+
+<div style="margin-top: 30px; font-size: 16px; color: #ff0; text-align: center;">
+  © Gods of War - Outil de Triangulation EU4
+</div>
+
+</body>
+</html>
